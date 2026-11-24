@@ -1,163 +1,332 @@
-#include <list>
-#include <vector>
-#include <cstring>
-#include <pthread.h>
-#include <thread>
-#include <atomic>
-#include <cstdlib>
-#include <chrono>
-#include <string>
-#include <algorithm>
-#include <cstdio>
+// ===================== TexMod: auto dump + auto apply =====================
+
 #include <jni.h>
+#include <string>
+#include <vector>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
-#include <fstream>
-#include <iostream>
+#include <cstring>
+#include <thread>
+#include <chrono>
 #include <dlfcn.h>
-#include "Includes/Logger.h"
+
 #include "Includes/obfuscate.h"
-#include "Includes/Utils.hpp"
-#include "Includes/Dobby.h"   // путь поправь под свой шаблон, если отличается
-#include "Menu/Menu.hpp"
-#include "Menu/Jni.hpp"
-#include "Includes/Macros.h"
 
-// ===================== TimeScale: хук set_timeScale =====================
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TEXMOD", __VA_ARGS__)
 
-static std::atomic<bool> timescaleOn{false};
-static std::atomic<float> timescale{1.0f};
-static std::atomic<bool> hookInstalled{false};
+// --- il2cpp API ---
+typedef void* (*il2cpp_domain_get_t)();
+typedef void** (*il2cpp_domain_get_assemblies_t)(void*, size_t*);
+typedef void* (*il2cpp_assembly_get_image_t)(void*);
+typedef void* (*il2cpp_class_from_name_t)(void*, const char*, const char*);
+typedef void* (*il2cpp_class_get_method_from_name_t)(void*, const char*, int);
+typedef void* (*il2cpp_runtime_invoke_t)(void*, void*, void**, void**);
+typedef void* (*il2cpp_thread_current_t)();
+typedef void* (*il2cpp_thread_attach_t)(void*);
+typedef const char* (*il2cpp_string_chars_t)(void*);
+typedef uint32_t (*il2cpp_array_length_t)(void*);
+typedef void* (*il2cpp_array_new_t)(void*, uintptr_t, uintptr_t);
 
-typedef void* (*il2cpp_resolve_icall_t)(const char*);
-static il2cpp_resolve_icall_t il2cpp_resolve_icall = nullptr;
+static il2cpp_domain_get_t il2cpp_domain_get = nullptr;
+static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = nullptr;
+static il2cpp_assembly_get_image_t il2cpp_assembly_get_image = nullptr;
+static il2cpp_class_from_name_t il2cpp_class_from_name = nullptr;
+static il2cpp_class_get_method_from_name_t il2cpp_class_get_method_from_name = nullptr;
+static il2cpp_runtime_invoke_t il2cpp_runtime_invoke = nullptr;
+static il2cpp_thread_current_t il2cpp_thread_current = nullptr;
+static il2cpp_thread_attach_t il2cpp_thread_attach = nullptr;
+static il2cpp_string_chars_t il2cpp_string_chars = nullptr;
+static il2cpp_array_length_t il2cpp_array_length = nullptr;
+static il2cpp_array_new_t il2cpp_array_new = nullptr;
 
-typedef void (*set_timeScale_t)(float);
-static set_timeScale_t old_set_timeScale = nullptr;
+static void* texKlass = nullptr;
+static void* resKlass = nullptr;
+static void* byteKlass = nullptr;
+static void* objKlass = nullptr;
+static void* rtKlass = nullptr;    // RenderTexture
+static void* gfxKlass = nullptr;   // Graphics
 
-// Хук: пока тумблер включён — любое обращение игры к set_timeScale
-// заменяется нашим значением. Выключен — игра живёт своей жизнью.
-static void _set_timeScale(float value) {
-    if (!old_set_timeScale) return;
-    if (timescaleOn.load())
-        old_set_timeScale(timescale.load());
-    else
-        old_set_timeScale(value);
+static void* mi_findAll = nullptr;     // Resources.FindObjectsOfTypeAll(Type)
+static void* mi_getTypeObj = nullptr;  // Object.GetType()
+static void* mi_objGetName = nullptr;  // Object.get_name()
+static void* mi_encodePNG = nullptr;   // Texture2D.EncodeToPNG()
+static void* mi_loadImage = nullptr;   // Texture2D.LoadImage(byte[])
+static void* mi_apply = nullptr;       // Texture2D.Apply(bool, bool)
+static void* mi_isReadable = nullptr;  // Texture2D.get_isReadable()
+static void* mi_texCtor = nullptr;     // Texture2D..ctor(int,int,int,int)
+static void* mi_readPixels = nullptr;  // Texture2D.ReadPixels(Rect,int,int)
+static void* mi_rtTemp = nullptr;      // RenderTexture.GetTemporary(int,int,int,int)
+static void* mi_blit = nullptr;        // Graphics.Blit(Texture, RenderTexture)
+static void* mi_rtActiveSet = nullptr; // RenderTexture.set_active
+static void* mi_rtRelease = nullptr;   // RenderTexture.ReleaseTemporary
+static void* mi_objDestroy = nullptr;  // Object.Destroy
+
+typedef int (*get_int_t)(void*);
+static get_int_t tex_get_width = nullptr;
+static get_int_t tex_get_height = nullptr;
+
+static std::string g_dumpDir;   // заполняется в hack_thread
+static std::string g_modDir;
+
+// Папка приложения: Android/data/<пакет>/files — пишем в свою, без разрешений
+static std::string GetAppBaseDir() {
+    char cmd[256] = {0};
+    FILE* f = fopen("/proc/self/cmdline", "rb");
+    if (f) { fread(cmd, 1, sizeof(cmd) - 1, f); fclose(f); }
+    std::string pkg(cmd);
+    if (pkg.empty()) { LOGI(OBFUSCATE("pkg name not found")); return "/storage/emulated/0/texmod_app"; }
+    return std::string("/storage/emulated/0/Android/data/") + pkg + "/files";
 }
 
-static void InstallTimeScaleHook() {
-    void *handle = dlopen("libil2cpp.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!handle) return;
+static void ResolveIl2Cpp() {
+    void *h = dlopen(OBFUSCATE("libil2cpp.so"), RTLD_NOW | RTLD_GLOBAL);
+    if (!h) return;
 
-    il2cpp_resolve_icall = (il2cpp_resolve_icall_t) dlsym(handle, "il2cpp_resolve_icall");
-    if (!il2cpp_resolve_icall) return;
+    il2cpp_domain_get = (il2cpp_domain_get_t) dlsym(h, OBFUSCATE("il2cpp_domain_get"));
+    il2cpp_domain_get_assemblies = (il2cpp_domain_get_assemblies_t) dlsym(h, OBFUSCATE("il2cpp_domain_get_assemblies"));
+    il2cpp_assembly_get_image = (il2cpp_assembly_get_image_t) dlsym(h, OBFUSCATE("il2cpp_assembly_get_image"));
+    il2cpp_class_from_name = (il2cpp_class_from_name_t) dlsym(h, OBFUSCATE("il2cpp_class_from_name"));
+    il2cpp_class_get_method_from_name = (il2cpp_class_get_method_from_name_t) dlsym(h, OBFUSCATE("il2cpp_class_get_method_from_name"));
+    il2cpp_runtime_invoke = (il2cpp_runtime_invoke_t) dlsym(h, OBFUSCATE("il2cpp_runtime_invoke"));
+    il2cpp_thread_current = (il2cpp_thread_current_t) dlsym(h, OBFUSCATE("il2cpp_thread_current"));
+    il2cpp_thread_attach = (il2cpp_thread_attach_t) dlsym(h, OBFUSCATE("il2cpp_thread_attach"));
+    il2cpp_string_chars = (il2cpp_string_chars_t) dlsym(h, OBFUSCATE("il2cpp_string_chars"));
+    il2cpp_array_length = (il2cpp_array_length_t) dlsym(h, OBFUSCATE("il2cpp_array_length"));
+    il2cpp_array_new = (il2cpp_array_new_t) dlsym(h, OBFUSCATE("il2cpp_array_new"));
 
-    void *fn = il2cpp_resolve_icall(OBFUSCATE("UnityEngine.Time::set_timeScale"));
-    if (!fn) {
-        LOGI(OBFUSCATE("set_timeScale not found"));
-        return;
+    if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_runtime_invoke) return;
+
+    void *domain = il2cpp_domain_get();
+    size_t count = 0;
+    void **assemblies = il2cpp_domain_get_assemblies(domain, &count);
+    for (size_t i = 0; i < count; i++) {
+        void *image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        if (!texKlass)  texKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Texture2D"));
+        if (!resKlass)  resKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Resources"));
+        if (!byteKlass) byteKlass = il2cpp_class_from_name(image, OBFUSCATE("System"), OBFUSCATE("Byte"));
+        if (!objKlass)  objKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Object"));
+        if (!rtKlass)   rtKlass   = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("RenderTexture"));
+        if (!gfxKlass)  gfxKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Graphics"));
+    }
+    if (!texKlass || !resKlass || !byteKlass || !objKlass || !rtKlass || !gfxKlass) return;
+
+    mi_findAll      = il2cpp_class_get_method_from_name(resKlass, OBFUSCATE("FindObjectsOfTypeAll"), 1);
+    mi_getTypeObj   = il2cpp_class_get_method_from_name(objKlass, OBFUSCATE("GetType"), 0);
+    mi_objGetName   = il2cpp_class_get_method_from_name(objKlass, OBFUSCATE("get_name"), 0);
+    mi_encodePNG    = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("EncodeToPNG"), 0);
+    mi_loadImage    = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("LoadImage"), 1);
+    mi_apply        = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("Apply"), 2);
+    mi_isReadable   = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("get_isReadable"), 0);
+    mi_texCtor      = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE(".ctor"), 4);
+    mi_readPixels   = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("ReadPixels"), 3);
+    mi_rtTemp       = il2cpp_class_get_method_from_name(rtKlass, OBFUSCATE("GetTemporary"), 4);
+    mi_blit         = il2cpp_class_get_method_from_name(gfxKlass, OBFUSCATE("Blit"), 2);
+    mi_rtActiveSet  = il2cpp_class_get_method_from_name(rtKlass, OBFUSCATE("set_active"), 1);
+    mi_rtRelease    = il2cpp_class_get_method_from_name(rtKlass, OBFUSCATE("ReleaseTemporary"), 1);
+    mi_objDestroy   = il2cpp_class_get_method_from_name(objKlass, OBFUSCATE("Destroy"), 1);
+
+    // icall'ы для размеров
+    auto resolve = (void* (*)(const char*)) dlsym(h, OBFUSCATE("il2cpp_resolve_icall"));
+    if (resolve) {
+        tex_get_width  = (get_int_t) resolve(OBFUSCATE("UnityEngine.Texture2D::get_width"));
+        tex_get_height = (get_int_t) resolve(OBFUSCATE("UnityEngine.Texture2D::get_height"));
+    }
+}
+
+static std::vector<std::pair<std::string, void*>> g_textures;
+
+static void ScanTextures() {
+    g_textures.clear();
+    if (!mi_findAll || !mi_getTypeObj || !mi_objGetName || !mi_texCtor) return;
+    il2cpp_thread_attach(il2cpp_thread_current());
+
+    int cargs[4] = {2, 2, 4, 0};
+    void* anchor = il2cpp_runtime_invoke(mi_texCtor, nullptr, (void**)cargs, nullptr);
+    if (!anchor) return;
+
+    void* typeObj = il2cpp_runtime_invoke(mi_getTypeObj, anchor, nullptr, nullptr);
+    if (!typeObj) return;
+
+    void* args[1] = { typeObj };
+    void* arr = il2cpp_runtime_invoke(mi_findAll, nullptr, args, nullptr);
+    if (!arr) return;
+
+    uint32_t n = il2cpp_array_length(arr);
+    for (uint32_t i = 0; i < n; i++) {
+        void* tex = *(void**)((uintptr_t)arr + 0x20 + i * sizeof(void*));
+        if (!tex) continue;
+        void* sname = il2cpp_runtime_invoke(mi_objGetName, tex, nullptr, nullptr);
+        if (!sname) continue;
+        g_textures.emplace_back(il2cpp_string_chars(sname), tex);
+    }
+}
+
+static std::string SanitizeName(std::string s) {
+    for (auto& c : s)
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>')
+            c = '_';
+    return s;
+}
+
+static void SavePNG(void* pngArr, const std::string& name, int& saved, int& skipped) {
+    if (!pngArr) { skipped++; return; }
+    uint32_t len = il2cpp_array_length(pngArr);
+    const uint8_t* data = (const uint8_t*)((uintptr_t)pngArr + 0x20);
+
+    std::string path = g_dumpDir + "/" + SanitizeName(name) + ".png";
+    FILE* f = fopen(path.c_str(), "wb");
+    if (f) { fwrite(data, 1, len, f); fclose(f); saved++; }
+    else skipped++;
+}
+
+// RT-blit: вытаскиваем пиксели из несжимаемой (non-readable) текстуры
+static void DumpViaBlit(void* tex, const std::string& name, int& saved, int& skipped) {
+    if (!mi_rtTemp || !mi_blit || !mi_readPixels || !mi_rtActiveSet || !mi_rtRelease ||
+        !mi_texCtor || !mi_encodePNG || !mi_objDestroy || !tex_get_width || !tex_get_height)
+    { skipped++; return; }
+
+    int w = tex_get_width(tex), h = tex_get_height(tex);
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) { skipped++; return; }
+
+    int rargs[4] = { w, h, 0, 0 }; // depth=0, формат по умолчанию
+    void* rt = il2cpp_runtime_invoke(mi_rtTemp, nullptr, (void**)rargs, nullptr);
+    if (!rt) { skipped++; return; }
+
+    void* bargs[2] = { tex, rt };
+    il2cpp_runtime_invoke(mi_blit, nullptr, bargs, nullptr);
+
+    il2cpp_runtime_invoke(mi_rtActiveSet, nullptr, (void*[]){ rt }, nullptr);
+
+    int cargs[4] = { w, h, 4, 0 }; // RGBA32, читаемый
+    void* tex2 = il2cpp_runtime_invoke(mi_texCtor, nullptr, (void**)cargs, nullptr);
+
+    void* pngArr = nullptr;
+    if (tex2) {
+        float rect[4] = { 0.0f, 0.0f, (float)w, (float)h }; // Rect — value type, передаём указателем
+        void* rpargs[3] = { rect, (void*)(intptr_t)0, (void*)(intptr_t)0 };
+        il2cpp_runtime_invoke(mi_readPixels, tex2, rpargs, nullptr);
+
+        uint8_t t = 1, upd = 0;
+        void* aargs[2] = { &t, &upd };
+        il2cpp_runtime_invoke(mi_apply, tex2, aargs, nullptr);
+
+        pngArr = il2cpp_runtime_invoke(mi_encodePNG, tex2, nullptr, nullptr);
+        il2cpp_runtime_invoke(mi_objDestroy, nullptr, (void*[]){ tex2 }, nullptr);
     }
 
-    DobbyHook(fn, (void *) _set_timeScale, (void **) &old_set_timeScale);
-    hookInstalled = true;
-    LOGI(OBFUSCATE("TimeScale hook installed"));
+    void* nullRt = nullptr;
+    il2cpp_runtime_invoke(mi_rtActiveSet, nullptr, &nullRt, nullptr);
+    il2cpp_runtime_invoke(mi_rtRelease, nullptr, (void*[]){ rt }, nullptr);
+
+    SavePNG(pngArr, name, saved, skipped);
 }
 
-// Поддержка: если игра редко трогает timeScale — периодически применяем сами
-static void TimeScaleKeepAlive() {
-    while (true) {
-        if (timescaleOn.load() && hookInstalled.load() && old_set_timeScale)
-            old_set_timeScale(timescale.load());
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+static bool DumpExists() {
+    DIR* d = opendir(g_dumpDir.c_str());
+    if (!d) return false;
+    bool hasFiles = false;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (e->d_name[0] != '.') { hasFiles = true; break; }
     }
+    closedir(d);
+    return hasFiles;
 }
 
-// ================================================================================
+static void DumpTextures() {
+    mkdir(g_dumpDir.c_str(), 0777);
+    ScanTextures();
+    if (!mi_encodePNG || !mi_isReadable) return;
 
-// Do not change or translate the first text unless you know what you are doing
-jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    jobjectArray ret;
+    int saved = 0, skipped = 0;
+    for (auto& [name, tex] : g_textures) {
+        if (!tex) continue;
 
-    // Динамическая подпись: показывает текущее значение timescale
-    char customLabel[64];
-    snprintf(customLabel, sizeof(customLabel),
-             "2_InputText_Custom speed (now: %.2f)", timescale.load());
+        void* readable = il2cpp_runtime_invoke(mi_isReadable, tex, nullptr, nullptr);
+        bool isReadable = readable && *(uint8_t*)readable;
 
-    const char *features[] = {
-            OBFUSCATE("Category_TimeScale"),                 // не нумеруется
-            OBFUSCATE("0_Toggle_TimeScale enabled"),         // case 0
-            OBFUSCATE("1_SeekBar_Speed x0.1-x10_1_100"),     // case 1 (значение /10)
-            customLabel                                      // case 2
-    };
-
-    int Total_Feature = (sizeof features / sizeof features[0]);
-    ret = (jobjectArray)
-            env->NewObjectArray(Total_Feature, env->FindClass(OBFUSCATE("java/lang/String")),
-                                env->NewStringUTF(""));
-
-    for (int i = 0; i < Total_Feature; i++)
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
-
-    return (ret);
+        if (isReadable) {
+            void* pngArr = il2cpp_runtime_invoke(mi_encodePNG, tex, nullptr, nullptr);
+            SavePNG(pngArr, name, saved, skipped);
+        } else {
+            // read/write off или сжатая — тащим через RenderTexture
+            DumpViaBlit(tex, name, saved, skipped);
+        }
+    }
+    LOGI(OBFUSCATE("dump done: saved=%d skipped=%d"), saved, skipped);
 }
 
-#define targetLibName OBFUSCATE("libil2cpp.so")
+static void ApplyCustomTextures() {
+    if (!mi_loadImage || !mi_apply || !il2cpp_array_new) return;
+    ScanTextures();
 
-void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
-             jint value, jlong Lvalue, jboolean boolean, jstring text) {
+    DIR* d = opendir(g_modDir.c_str());
+    if (!d) { LOGI(OBFUSCATE("texmod dir missing")); return; }
 
-    switch (featNum) {
-        case 0: // Toggle_TimeScale enabled
-            timescaleOn = boolean;
-            if (!timescaleOn && hookInstalled.load() && old_set_timeScale) {
-                timescale = 1.0f;
-                old_set_timeScale(1.0f);   // off(): возврат к нормальной скорости
-            }
-            break;
+    struct dirent* e;
+    int applied = 0;
+    while ((e = readdir(d)) != nullptr) {
+        const char* fn = e->d_name;
+        size_t ln = strlen(fn);
+        if (ln < 5 || strcmp(fn + ln - 4, OBFUSCATE(".png")) != 0) continue;
+        std::string name(fn, ln - 4);
 
-        case 1: // SeekBar: 1..100 -> 0.1..10.0
-            timescale = value / 10.0f;
-            timescaleOn = true;
-            if (hookInstalled.load() && old_set_timeScale)
-                old_set_timeScale(timescale.load());
-            break;
+        for (auto& [tname, tex] : g_textures) {
+            if (tname != name || !tex) continue;
 
-        case 2: { // InputText: ручной ввод без ограничений
-            if (!text) break;
-            const char *str = env->GetStringUTFChars(text, nullptr);
-            if (str) {
-                std::string s(str);
-                env->ReleaseStringUTFChars(text, str);
+            std::string path = g_modDir + "/" + fn;
+            FILE* f = fopen(path.c_str(), "rb");
+            if (!f) break;
+            fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+            std::vector<char> buf(sz);
+            fread(buf.data(), 1, sz, f);
+            fclose(f);
 
-                // русская раскладка вводит "0,5" — приводим к "0.5"
-                std::replace(s.begin(), s.end(), ',', '.');
+            void* marr = il2cpp_array_new(byteKlass, sz, 0);
+            if (!marr) break;
+            memcpy((void*)((uintptr_t)marr + 0x20), buf.data(), sz);
 
-                float v = strtof(s.c_str(), nullptr);
-                timescale = v;      // любое значение, включая минус и дроби
-                timescaleOn = true; // ввод значения = тумблер включён
-                if (hookInstalled.load() && old_set_timeScale)
-                    old_set_timeScale(v);
-            }
+            void* largs[1] = { marr };
+            il2cpp_runtime_invoke(mi_loadImage, tex, largs, nullptr);
+
+            uint8_t t = 1, upd = 0;
+            void* aargs[2] = { &t, &upd };
+            il2cpp_runtime_invoke(mi_apply, tex, aargs, nullptr);
+            applied++;
             break;
         }
-
-        default:
-            break;
     }
+    closedir(d);
+    LOGI(OBFUSCATE("applied=%d"), applied);
 }
 
 void hack_thread() {
-    // libil2cpp.so загружается не сразу — ждём
-    while (!isLibraryLoaded(targetLibName)) {
+    while (!dlopen(OBFUSCATE("libil2cpp.so"), RTLD_NOLOAD)) {
         sleep(1);
     }
+    sleep(20); // даём игре прогрузиться
 
-    InstallTimeScaleHook();
-    std::thread(TimeScaleKeepAlive).detach();
+    ResolveIl2Cpp();
+    if (!mi_findAll) { LOGI(OBFUSCATE("resolve failed")); return; }
 
-    LOGI(OBFUSCATE("Done"));
-}
+    g_dumpDir = GetAppBaseDir() + "/texdump";
+    g_modDir  = GetAppBaseDir() + "/texmod";
 
-__attribute__((constructor))
-void lib_main() {
-    std::thread(hack_thread).detach();
+    il2cpp_thread_attach(il2cpp_thread_current());
+
+    if (!DumpExists()) {
+        LOGI(OBFUSCATE("no dump, dumping..."));
+        DumpTextures();
+    } else {
+        LOGI(OBFUSCATE("dump exists, skip"));
+    }
+
+    ApplyCustomTextures();
+
+    while (true) {
+        sleep(60);
+        ApplyCustomTextures();
+    }
 }
