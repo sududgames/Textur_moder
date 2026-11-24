@@ -10,6 +10,7 @@
 #include <thread>
 #include <chrono>
 #include <dlfcn.h>
+#include <android/log.h>
 
 #include "Includes/obfuscate.h"
 
