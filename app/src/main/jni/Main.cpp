@@ -1,7 +1,7 @@
 // ===================== TexMod: auto dump + auto apply =====================
 // Полностью автоматический: при запуске проверяет дамп (нет — дампит),
 // применяет текстуры из texmod и повторяет применение каждые 60 секунд.
-// Функции меню (Init/Icon/SettingsList) теперь в Menu.cpp — здесь их нет.
+// Функции меню (Init/Icon/IconWebViewData/SettingsList) — в Menu.cpp.
 
 #include <jni.h>
 #include <string>
@@ -366,4 +366,3 @@ void hack_thread() {
         ApplyCustomTextures();
     }
 }
-
