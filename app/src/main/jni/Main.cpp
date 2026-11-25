@@ -1,6 +1,7 @@
 // ===================== TexMod: auto dump + auto apply =====================
 // Полностью автоматический: при запуске проверяет дамп (нет — дампит),
 // применяет текстуры из texmod и повторяет применение каждые 60 секунд.
+// Функции меню (Init/Icon/SettingsList) теперь в Menu.cpp — здесь их нет.
 
 #include <jni.h>
 #include <string>
@@ -319,34 +320,12 @@ static void ApplyCustomTextures() {
     LOGI(OBFUSCATE("applied=%d"), applied);
 }
 
-// ===================== Заглушки JNI (нужны Setup.cpp для линковки) =====================
-// Сигнатуры сверены с ld.lld: undefined symbol из последней сборки.
-
-void Init(JNIEnv *env, jobject thiz, jobject ctx, jobject title, jobject subtitle) {
-    (void)env; (void)thiz; (void)ctx; (void)title; (void)subtitle;
-    // визуала нет — весь функционал автоматический
-}
-
-jstring Icon(JNIEnv *env, jobject thiz) {
-    (void)thiz;
-    return env->NewStringUTF(OBFUSCATE(""));
-}
-
-jstring IconWebViewData(JNIEnv *env, jobject thiz) {
-    (void)env; (void)thiz;
-    return nullptr;
-}
-
-jobjectArray SettingsList(JNIEnv *env, jobject activityObject) {
-    (void)activityObject;
-    jclass strClass = env->FindClass(OBFUSCATE("java/lang/String"));
-    return env->NewObjectArray(0, strClass, nullptr);
-}
+// ===================== Заглушки фич (их нет в Menu.cpp, а Setup.cpp их зовёт) =====================
 
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
     (void)context;
     jclass strClass = env->FindClass(OBFUSCATE("java/lang/String"));
-    return env->NewObjectArray(0, strClass, nullptr);
+    return env->NewObjectArray(0, strClass, nullptr); // фич пока нет — только настройки
 }
 
 void Changes(JNIEnv *env, jclass clazz, jobject obj, jint featNum, jstring featName,
