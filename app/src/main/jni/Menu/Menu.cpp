@@ -1,9 +1,8 @@
 #include "Includes/obfuscate.h"
 #include "Menu/Menu.hpp"
 
-// Сигнатура Init сверена с RegisterMenu: (Landroid/content/Context;Landroid/widget/TextView;Landroid/widget/TextView;)V
-void Init(JNIEnv *env, jobject ctx, jobject title, jobject subtitle) {
-    (void)ctx;
+void Init(JNIEnv *env, jobject thiz, jobject ctx, jobject title, jobject subtitle) {
+    (void)thiz; (void)ctx;
 
     //Set title
     setText(env, title, OBFUSCATE("<b>Modded by (SUDUD)</b>"));
@@ -14,7 +13,7 @@ void Init(JNIEnv *env, jobject ctx, jobject title, jobject subtitle) {
                                      "SPRING SECRET 2</p>"
                                      "</marquee></b>"));
 
-    //Диалог «Welcome to your mod menu» и тост убраны — при запуске ничего не всплывает.
+    //Диалог «Welcome to your mod menu» и тост убраны.
 }
 
 jstring Icon(JNIEnv *env, jobject thiz) {
