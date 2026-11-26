@@ -14,12 +14,15 @@
 #include <android/log.h>
 
 #include "Includes/obfuscate.h"
-#include "Menu/Menu.hpp"   // правка: те же сигнатуры, что в Menu.hpp; RegisterNatives в Setup.cpp
+#include "Includes/Utils.hpp"
+#include "Menu/Menu.hpp"
 
 #ifndef ANDROID_LOG_INFO
 #define ANDROID_LOG_INFO 4
 #endif
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TEXMOD", __VA_ARGS__)
+
+#define targetLibName OBFUSCATE("libil2cpp.so")
 
 // --- il2cpp API ---
 typedef void*  (*il2cpp_domain_get_t)();
@@ -98,7 +101,9 @@ static bool DumpExists() {
 }
 
 static void ResolveIl2Cpp() {
-    // Ждём загрузки libil2cpp.so — loadNative может сработать раньше Unity
+    // dlopen как страховка: библиотека уже должна быть загружена
+    // (hack_thread дождётся её через isLibraryLoaded), но на всякий
+    // случай оставляем цикл ожидания
     void* h = nullptr;
     while (!h) {
         h = dlopen(OBFUSCATE("libil2cpp.so"), RTLD_NOW | RTLD_GLOBAL);
@@ -317,6 +322,11 @@ static void ApplyCustomTextures() {
 }
 
 static void hack_thread() {
+    // libil2cpp.so загружается не сразу — ждём (как в рабочем моде)
+    while (!isLibraryLoaded(targetLibName)) {
+        sleep(1);
+    }
+
     ResolveIl2Cpp();
 
     if (!texKlass || !il2cpp_runtime_invoke) {
@@ -376,12 +386,13 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
 }
 
 // ============================================================================
-// Точка входа JNI. Имя (loadNative) должно ТОЧНО совпадать с нативным методом
-// в smali-классе com/android/support/Launcher.smali. JNI_OnLoad здесь НЕ
-// определяем — он в Setup.cpp.
+// Точка входа — конструктор библиотеки: запускается автоматически при
+// загрузке .so в процесс игры (как в рабочем моде). Никаких привязок к
+// smali-классу Launcher — имя метода в smali теперь не важно.
+// JNI_OnLoad здесь НЕ определяем — он в Setup.cpp.
 // ============================================================================
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_android_support_Launcher_loadNative(JNIEnv*, jclass) {
+__attribute__((constructor))
+static void lib_main() {
     std::thread(hack_thread).detach();
 }
