@@ -34,10 +34,10 @@ typedef void*  (*il2cpp_runtime_invoke_t)(void*, void*, void**, void**);
 typedef void*  (*il2cpp_thread_attach_t)(void*);
 typedef const char* (*il2cpp_string_chars_t)(void*);
 typedef uint32_t    (*il2cpp_array_length_t)(void*);
-typedef void*  (*il2cpp_array_new_t)(void*, uintptr_t);   // (klass, length)
+typedef void*  (*il2cpp_array_new_t)(void*, uintptr_t);
 typedef void*  (*il2cpp_class_get_type_t)(void*);
 typedef void*  (*il2cpp_type_get_object_t)(void*);
-typedef void*  (*il2cpp_value_box_t)(void*, void*);       // (klass, void* value) → boxed
+typedef void*  (*il2cpp_value_box_t)(void*, void*);
 
 static il2cpp_domain_get_t il2cpp_domain_get = nullptr;
 static il2cpp_domain_get_assemblies_t il2cpp_domain_get_assemblies = nullptr;
@@ -53,19 +53,23 @@ static il2cpp_class_get_type_t il2cpp_class_get_type = nullptr;
 static il2cpp_type_get_object_t il2cpp_type_get_object = nullptr;
 static il2cpp_value_box_t il2cpp_value_box = nullptr;
 
-static void* texKlass   = nullptr; // UnityEngine.Texture2D (Il2CppClass*)
-static void* texType    = nullptr; // System.Type для Texture2D (Il2CppObject*)
-static void* resKlass   = nullptr; // UnityEngine.Resources
-static void* byteKlass  = nullptr; // System.Byte
-static void* boolKlass  = nullptr; // System.Boolean
-static void* objKlass   = nullptr; // UnityEngine.Object
+static void* texKlass   = nullptr;
+static void* imgConvKlass = nullptr; // UnityEngine.ImageConversion (Unity 5.6+)
+static void* texType    = nullptr;
+static void* resKlass   = nullptr;
+static void* byteKlass  = nullptr;
+static void* boolKlass  = nullptr;
+static void* objKlass   = nullptr;
 
-static void* mi_findAll    = nullptr; // Resources.FindObjectsOfTypeAll(Type)
-static void* mi_objGetName = nullptr; // Object.get_name()
-static void* mi_encodePNG  = nullptr; // Texture2D.EncodeToPNG() (instance)
-static void* mi_loadImage  = nullptr; // Texture2D.LoadImage(byte[]) (instance)
-static void* mi_apply      = nullptr; // Texture2D.Apply(bool, bool)
-static void* mi_isReadable = nullptr; // Texture2D.get_isReadable()
+static void* mi_findAll    = nullptr;
+static void* mi_objGetName = nullptr;
+static void* mi_encodePNG  = nullptr;
+static void* mi_loadImage  = nullptr;
+static void* mi_apply      = nullptr;
+static void* mi_isReadable = nullptr;
+
+// true, если EncodeToPNG/LoadImage найдены как статические в ImageConversion
+static bool g_texConvStatic = false;
 
 static std::string g_dumpDir;
 static std::string g_modDir;
@@ -76,7 +80,7 @@ static const char* kStorageRoot = "/storage/emulated/0";
 static constexpr uintptr_t kArrayHeaderSize = 0x20;
 static inline void* ArrayData(void* arr) { return (void*)((char*)arr + kArrayHeaderSize); }
 
-// Il2CppObject { klass(8) + monitor(8) + value[0] } → значимое значение с 0x10
+// Il2CppObject { klass(8) + monitor(8) + value[0] } — значение значимого типа с 0x10
 static constexpr uintptr_t kBoxedValueOffset = 0x10;
 
 static bool StorageAccessOK() {
@@ -101,9 +105,6 @@ static bool DumpExists() {
 }
 
 static void ResolveIl2Cpp() {
-    // dlopen как страховка: библиотека уже должна быть загружена
-    // (hack_thread дождётся её через isLibraryLoaded), но на всякий
-    // случай оставляем цикл ожидания
     void* h = nullptr;
     while (!h) {
         h = dlopen(OBFUSCATE("libil2cpp.so"), RTLD_NOW | RTLD_GLOBAL);
@@ -133,7 +134,6 @@ static void ResolveIl2Cpp() {
         return;
     }
 
-    // Ждём ненулевой domain — инициализируется позже, чем грузится libil2cpp.so
     void* domain = nullptr;
     while (!domain) {
         domain = il2cpp_domain_get();
@@ -152,18 +152,28 @@ static void ResolveIl2Cpp() {
 
     for (size_t i = 0; i < count; ++i) {
         void* image = il2cpp_assembly_get_image(assemblies[i]);
-        if (!texKlass)  texKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Texture2D"));
-        if (!resKlass)  resKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Resources"));
-        if (!byteKlass) byteKlass = il2cpp_class_from_name(image, OBFUSCATE("System"),      OBFUSCATE("Byte"));
-        if (!boolKlass) boolKlass = il2cpp_class_from_name(image, OBFUSCATE("System"),      OBFUSCATE("Boolean"));
-        if (!objKlass)  objKlass  = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Object"));
+        if (!texKlass)     texKlass     = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Texture2D"));
+        if (!imgConvKlass) imgConvKlass = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("ImageConversion"));
+        if (!resKlass)     resKlass     = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Resources"));
+        if (!byteKlass)    byteKlass    = il2cpp_class_from_name(image, OBFUSCATE("System"),      OBFUSCATE("Byte"));
+        if (!boolKlass)    boolKlass    = il2cpp_class_from_name(image, OBFUSCATE("System"),      OBFUSCATE("Boolean"));
+        if (!objKlass)     objKlass     = il2cpp_class_from_name(image, OBFUSCATE("UnityEngine"), OBFUSCATE("Object"));
     }
 
     if (resKlass) mi_findAll    = il2cpp_class_get_method_from_name(resKlass, OBFUSCATE("FindObjectsOfTypeAll"), 1);
     if (objKlass) mi_objGetName = il2cpp_class_get_method_from_name(objKlass, OBFUSCATE("get_name"), 0);
+
+    // Unity 5.6+: EncodeToPNG/LoadImage — статические методы класса ImageConversion
+    if (imgConvKlass) {
+        mi_encodePNG = il2cpp_class_get_method_from_name(imgConvKlass, OBFUSCATE("EncodeToPNG"), 1); // (Texture2D)
+        mi_loadImage = il2cpp_class_get_method_from_name(imgConvKlass, OBFUSCATE("LoadImage"), 2);   // (Texture2D, byte[])
+        g_texConvStatic = (mi_encodePNG != nullptr);
+    }
+    // Фолбэк для старых Unity: инстансные методы Texture2D
     if (texKlass) {
-        mi_encodePNG  = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("EncodeToPNG"), 0);
-        mi_loadImage  = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("LoadImage"), 1);
+        if (!mi_encodePNG) mi_encodePNG = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("EncodeToPNG"), 0);
+        if (!mi_loadImage) mi_loadImage = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("LoadImage"), 1);
+
         mi_apply      = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("Apply"), 2);
         mi_isReadable = il2cpp_class_get_method_from_name(texKlass, OBFUSCATE("get_isReadable"), 0);
         if (il2cpp_class_get_type && il2cpp_type_get_object) {
@@ -171,8 +181,8 @@ static void ResolveIl2Cpp() {
         }
     }
 
-    LOGI(OBFUSCATE("il2cpp resolved: tex=%p type=%p bool=%p findAll=%p png=%p box=%p"),
-         texKlass, texType, boolKlass, mi_findAll, mi_encodePNG, il2cpp_value_box);
+    LOGI(OBFUSCATE("il2cpp resolved: tex=%p imgConv=%p type=%p findAll=%p enc=%p load=%p apply=%p static=%d"),
+         texKlass, imgConvKlass, texType, mi_findAll, mi_encodePNG, mi_loadImage, mi_apply, (int)g_texConvStatic);
 }
 
 static std::string SanitizeName(const char* name) {
@@ -224,7 +234,15 @@ static void DumpTextures() {
         }
 
         exc = nullptr;
-        void* png = il2cpp_runtime_invoke(mi_encodePNG, tex, nullptr, &exc);
+        void* png = nullptr;
+        if (g_texConvStatic) {
+            // Статический EncodeToPNG(Texture2D): obj = nullptr, tex — аргумент
+            void* encParams[1] = { tex };
+            png = il2cpp_runtime_invoke(mi_encodePNG, nullptr, encParams, &exc);
+        } else {
+            // Инстансный EncodeToPNG(): obj = tex
+            png = il2cpp_runtime_invoke(mi_encodePNG, tex, nullptr, &exc);
+        }
         if (exc || !png) { skipped++; continue; }
 
         uint32_t pngSize = il2cpp_array_length(png);
@@ -286,7 +304,6 @@ static void ApplyCustomTextures() {
             void* nameObj = il2cpp_runtime_invoke(mi_objGetName, tex, nullptr, &exc);
             if (exc || !nameObj) continue;
             const char* cname = il2cpp_string_chars(nameObj);
-            // Сравниваем с санитизированным именем — так же, как сохраняли в DumpTextures
             if (cname && want == SanitizeName(cname)) { target = tex; break; }
         }
         if (!target) continue;
@@ -298,10 +315,16 @@ static void ApplyCustomTextures() {
         if (!byteArr) continue;
         memcpy(ArrayData(byteArr), png.data(), png.size());
 
-        // LoadImage — ИНСТАНСНЫЙ метод, obj = target
-        void* liParams[1] = { byteArr };
         exc = nullptr;
-        il2cpp_runtime_invoke(mi_loadImage, target, liParams, &exc);
+        if (g_texConvStatic) {
+            // Статический LoadImage(Texture2D, byte[]): obj = nullptr
+            void* liParams[2] = { target, byteArr };
+            il2cpp_runtime_invoke(mi_loadImage, nullptr, liParams, &exc);
+        } else {
+            // Инстансный LoadImage(byte[]): obj = target
+            void* liParams[1] = { byteArr };
+            il2cpp_runtime_invoke(mi_loadImage, target, liParams, &exc);
+        }
         if (exc) continue;
 
         // bool-аргументы для Apply нужно боксить
@@ -339,7 +362,7 @@ static void hack_thread() {
 
     // Ждём выдачи MANAGE_EXTERNAL_STORAGE — тумблер могут включить после старта игры
     while (!StorageAccessOK()) {
-        LOGI(OBFUSCATE("storage access DENIED — grant All files access in Settings (retry in 10s)"));
+        LOGI(OBFUSCATE("storage access DENIED - grant All files access in Settings (retry in 10s)"));
         std::this_thread::sleep_for(std::chrono::seconds(10));
     }
     LOGI(OBFUSCATE("storage access OK"));
@@ -363,14 +386,13 @@ static void hack_thread() {
 // ============================================================================
 // Контракт LGL: определения совпадают с Menu.hpp один-в-один.
 // Setup.cpp регистрирует их через RegisterNatives:
-//   GetFeatureList → com/android/support/Menu,      ()[Ljava/lang/String;
-//   Changes        → com/android/support/Preferences, (Landroid/content/Context;ILjava/lang/String;IJZLjava/lang/String;)V
-// Из-за RegisterNatives (а не обычного экспорта) extern "C" не требуется —
-// берётся адрес функции и вызывается как обычный указатель.
+//   GetFeatureList -> com/android/support/Menu,      ()[Ljava/lang/String;
+//   Changes        -> com/android/support/Preferences, (Landroid/content/Context;ILjava/lang/String;IJZLjava/lang/String;)V
+// Из-за RegisterNatives (а не обычного экспорта) extern "C" не требуется.
 // ============================================================================
 
 jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    (void)context; // меню не использует контекст — только для совместимости сигнатуры
+    (void)context;
     // TexMod автоматический — тумблеров в меню нет, пустой массив строк
     jclass strClass = env->FindClass(OBFUSCATE("java/lang/String"));
     if (!strClass) return nullptr;
@@ -387,8 +409,7 @@ void Changes(JNIEnv *env, jclass clazz, jobject obj,
 
 // ============================================================================
 // Точка входа — конструктор библиотеки: запускается автоматически при
-// загрузке .so в процесс игры (как в рабочем моде). Никаких привязок к
-// smali-классу Launcher — имя метода в smali теперь не важно.
+// загрузке .so в процесс игры. Никаких привязок к smali-классу Launcher.
 // JNI_OnLoad здесь НЕ определяем — он в Setup.cpp.
 // ============================================================================
 
