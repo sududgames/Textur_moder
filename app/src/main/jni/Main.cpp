@@ -146,7 +146,7 @@ static bool InitApiPointers() {
         if (!g_il2cppHandle) { LogMsg("dlopen libil2cpp.so failed"); return false; }
         LogMsg("libil2cpp.so loaded");
     }
-#define GETSYM(var, name) if (!(var)) (var) = dlsym(g_il2cppHandle, name);
+#define GETSYM(var, name) if (!(var)) (var) = reinterpret_cast<decltype(var)>(dlsym(g_il2cppHandle, name));
     GETSYM(p_DomainGet, "il2cpp_domain_get");
     GETSYM(p_ThreadAttach, "il2cpp_thread_attach");
     GETSYM(p_AssemblyGetImage, "il2cpp_assembly_get_image");
@@ -496,29 +496,28 @@ void lib_main() {
 }
 
 // ================= menu contract =================
-// Signatures must match Menu.hpp exactly (no extern "C" there):
+// Signatures must match Menu.hpp exactly:
 //   jobjectArray GetFeatureList(JNIEnv *env, jobject context);
-//   void Changes(JNIEnv *env, jclass clazz, jobject obj, int featNum,
-//                jstring featName, int value, long changes,
-//                unsigned char boolean, jstring str);
+//   void Changes(JNIEnv *env, jclass clazz, jobject obj,
+//                int featNum, jstring featName, int value,
+//                long changes, unsigned char boolean, jstring str);
+// No extern "C": Setup.cpp calls the C++-mangled symbols from Menu.hpp.
 
-jobjectArray GetFeatureList(JNIEnv *env, jobject) {
-    (void)env;
-    static const char* features[] = {
-        "Toggle_Inject Textures_on"
+jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
+    jclass stringCls = env->FindClass("java/lang/String");
+    const char* items[] = {
+        "Inject Textures_0_on"   // toggle: name_index_default
     };
-    const int total = (int)(sizeof(features) / sizeof(features[0]));
-    jclass strClass = env->FindClass("java/lang/String");
-    jobjectArray ret = env->NewObjectArray(total, strClass, env->NewStringUTF(""));
-    for (int i = 0; i < total; i++)
-        env->SetObjectArrayElement(ret, i, env->NewStringUTF(features[i]));
-    LOGI("GetFeatureList: %d items", total);
-    return ret;
+    jobjectArray arr = env->NewObjectArray(1, stringCls, NULL);
+    for (int i = 0; i < 1; i++)
+        env->SetObjectArrayElement(arr, i, env->NewStringUTF(items[i]));
+    LOGI("GetFeatureList: 1 feature");
+    return arr;
 }
 
-void Changes(JNIEnv *env, jclass, jobject, int featNum, jstring,
-             int value, long changes, unsigned char boolean, jstring) {
-    (void)value; (void)changes; (void)featNum;
+void Changes(JNIEnv *env, jclass clazz, jobject obj, int featNum,
+             jstring featName, int value, long changes,
+             unsigned char boolean, jstring str) {
     if (featNum == 0) {
         g_injectEnabled = (boolean != 0);
         LogMsg("inject enabled: %d", g_injectEnabled ? 1 : 0);
