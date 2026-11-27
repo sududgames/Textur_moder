@@ -496,31 +496,33 @@ void lib_main() {
 }
 
 // ================= menu contract =================
-// Signatures must match Menu.hpp exactly:
+// Signatures MUST match Menu.hpp exactly:
 //   jobjectArray GetFeatureList(JNIEnv *env, jobject context);
 //   void Changes(JNIEnv *env, jclass clazz, jobject obj,
-//                int featNum, jstring featName, int value,
-//                long changes, unsigned char boolean, jstring str);
-// No extern "C": Setup.cpp calls the C++-mangled symbols from Menu.hpp.
+//                jint featNum, jstring featName, jint value,
+//                jlong changes, jboolean boolean, jstring str);
+// No extern "C": Setup.cpp references them with C++ linkage.
 
-jobjectArray GetFeatureList(JNIEnv *env, jobject context) {
-    jclass stringCls = env->FindClass("java/lang/String");
-    const char* items[] = {
-        "Inject Textures_0_on"   // toggle: name_index_default
-    };
-    jobjectArray arr = env->NewObjectArray(1, stringCls, NULL);
-    for (int i = 0; i < 1; i++)
-        env->SetObjectArrayElement(arr, i, env->NewStringUTF(items[i]));
-    LOGI("GetFeatureList: 1 feature");
+jobjectArray GetFeatureList(JNIEnv *env, jobject obj) {
+    (void)obj;
+    const char* features[] = { "Inject Textures,10,0" };
+    int count = (int)(sizeof(features) / sizeof(features[0]));
+    jclass strCls = env->FindClass("java/lang/String");
+    jobjectArray arr = env->NewObjectArray(count, strCls, NULL);
+    for (int i = 0; i < count; i++)
+        env->SetObjectArrayElement(arr, i, env->NewStringUTF(features[i]));
+    LOGI("GetFeatureList: %d features", count);
     return arr;
 }
 
-void Changes(JNIEnv *env, jclass clazz, jobject obj, int featNum,
-             jstring featName, int value, long changes,
-             unsigned char boolean, jstring str) {
+void Changes(JNIEnv *env, jclass cls, jobject obj, jint featNum,
+             jstring featName, jint value, jlong changes,
+             jboolean boolean, jstring str) {
+    (void)env; (void)cls; (void)obj; (void)featName;
+    (void)value; (void)changes; (void)str;
     if (featNum == 0) {
         g_injectEnabled = (boolean != 0);
         LogMsg("inject enabled: %d", g_injectEnabled ? 1 : 0);
     }
-    LOGI("Changes: featNum=%d boolean=%d", featNum, (int)boolean);
+    LOGI("Changes: featNum=%d boolean=%d", (int)featNum, (int)boolean);
 }
