@@ -146,7 +146,7 @@ static bool InitApiPointers() {
         if (!g_il2cppHandle) { LogMsg("dlopen libil2cpp.so failed"); return false; }
         LogMsg("libil2cpp.so loaded");
     }
-#define GETSYM(var, name) if (!(var)) (var) = dlsym(g_il2cppHandle, name);
+#define GETSYM(var, name) if (!(var)) (var) = reinterpret_cast<decltype(var)>(dlsym(g_il2cppHandle, name));
     GETSYM(p_DomainGet, "il2cpp_domain_get");
     GETSYM(p_ThreadAttach, "il2cpp_thread_attach");
     GETSYM(p_AssemblyGetImage, "il2cpp_assembly_get_image");
@@ -373,7 +373,8 @@ static bool InvokeLoadImage(void* texObj, void* byteArr) {
     }
     if (g_loadImg_icall) {
         typedef bool (*fn_LoadImage_icall)(void*, void*, bool);
-        return ((fn_LoadImage_icall)g_loadImg_icall)(texObj, byteArr, false);
+        fn_LoadImage_icall icall = reinterpret_cast<fn_LoadImage_icall>(g_loadImg_icall);
+        return icall(texObj, byteArr, false);
     }
     return false;
 }
@@ -498,13 +499,13 @@ void lib_main() {
 // ================= menu contract =================
 static std::string g_FeatureList;
 
-extern "C" void GetFeatureList(JNIEnv *env, jobject obj) {
+extern "C" jstring GetFeatureList(JNIEnv *env, jobject obj) {
     // The exact format depends on the menu template (Menu.hpp / Setup.cpp).
     // If the menu shows nothing — send an example of GetFeatureList from the template
     // and I'll adjust the format.
     g_FeatureList = "Inject Textures,10,0";
-    env->NewStringUTF(g_FeatureList.c_str());
     LOGI("GetFeatureList: %s", g_FeatureList.c_str());
+    return env->NewStringUTF(g_FeatureList.c_str());
 }
 
 extern "C" void Changes(JNIEnv *env, jclass cls, jobject obj, int featNum,
